@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Controlador de Mano</title>
+    <style>
+        body {
+            background: #ffffff;
+            color: #333;
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        video {
+            transform: scaleX(-1);
+            width: 100%;
+            max-width: 400px;
+            border: 2px solid #50c878;
+            border-radius: 10px;
+            background: #000;
+        }
+
+        .status {
+            margin-top: 20px;
+            font-size: 1.2rem;
+        }
+
+        .dot {
+            height: 15px;
+            width: 15px;
+            background-color: #bbb;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 10px;
+        }
+
+        .connected {
+            background-color: #50c878;
+            box-shadow: 0 0 10px #50c878;
+        }
+
+        #debug {
+            margin-top: 15px;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.05);
+            border-radius: 5px;
+            font-size: 0.9rem;
+            max-width: 400px;
+            width: 100%;
+            text-align: left;
+        }
+
+        .error {
+            color: #ff6b6b;
+        }
+
+        .success {
+            color: #50c878;
+        }
+    </style>
+
+    <!-- Librerías de MediaPipe y Socket.io -->
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+
+<body>
+
+    <h2>Apunta con la cámara</h2>
+    <video class="input_video" autoplay playsinline></video>
+    <div class="status"><span id="status-dot" class="dot"></span><span id="status-text">Desconectado</span></div>
+    <p style="font-size: 0.8rem; color: #666;">Pon tu celular en horizontal para mejor control</p>
+    <div id="debug">
+        <div>📋 Iniciando...</div>
+    </div>
+
+    <script>
+        const debugDiv = document.getElementById('debug');
+
+        function log(message, isError = false) {
+            console.log(message);
+            const div = document.createElement('div');
+            div.textContent = message;
+            div.className = isError ? 'error' : 'success';
+            debugDiv.appendChild(div);
+            // Mantener solo los últimos 5 mensajes
+            while (debugDiv.children.length > 5) {
+                debugDiv.removeChild(debugDiv.firstChild);
+            }
+        }
+
+        const socket = io();
+        const videoElement = document.getElementsByClassName('input_video')[0];
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+
+        // Estado de conexión
+        socket.on('connect', () => {
+            statusDot.classList.add('connected');
+            statusText.innerText = "Conectado al PC";
+            log('✅ Conectado al servidor');
+        });
+
+        socket.on('disconnect', () => {
+            statusDot.classList.remove('connected');
+            statusText.innerText = "Desconectado";
+            log('❌ Desconectado del servidor', true);
+        });
+
+        log('🔌 Conectando a Socket.io...');
+
+        // Configuración de MediaPipe Hands
+        log('🤖 Configurando MediaPipe...');
+        const hands = new Hands({
+            locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+            }
+        });
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
+        });
+
+        hands.onResults(onResults);
+        log('✅ MediaPipe configurado');
+
+        // Inicializar cámara
+        log('📹 Solicitando acceso a cámara...');
+
+        // Primero intentar obtener permisos de cámara manualmente
+        navigator.mediaDevices.getUserMedia({
+            video: {
+                facingMode: 'user',
+                width: { ideal: 640 },
+                height: { ideal: 480 }
+            }
+        })
+            .then(stream => {
+                log('✅ Cámara accesible');
+                videoElement.srcObject = stream;
+
+                videoElement.onloadedmetadata = () => {
+                    log('✅ Video cargado, iniciando MediaPipe...');
+
+                    const camera = new Camera(videoElement, {
+                        onFrame: async () => {
+                            await hands.send({ image: videoElement });
+                        },
+                        width: 640,
+                        height: 480
+                    });
+                    camera.start();
+                    log('✅ Sistema iniciado correctamente');
+                };
+            })
+            .catch(err => {
+                log('❌ Error de cámara: ' + err.message, true);
+                log('💡 Verifica permisos de cámara', true);
+            });
+
+        let handDetected = false;
+        function onResults(results) {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                if (!handDetected) {
+                    log('🖐️ Mano detectada');
+                    handDetected = true;
+                }
+
+                const landmarks = results.multiHandLandmarks[0];
+                const indexFinger = landmarks[8];
+
+                // ENVIAR DATOS AL SERVIDOR (mano detectada)
+                socket.emit('hand-data', {
+                    x: 1 - indexFinger.x,
+                    y: indexFinger.y,
+                    detected: true
+                });
+            } else {
+                if (handDetected) {
+                    log('👋 Mano perdida');
+                    handDetected = false;
+                }
+
+                // ENVIAR DATOS AL SERVIDOR (sin mano)
+                socket.emit('hand-data', {
+                    x: 0,
+                    y: 0,
+                    detected: false
+                });
+            }
+        }
+    </script>
+</body>
+
+</html>
