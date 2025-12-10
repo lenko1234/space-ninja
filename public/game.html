@@ -176,8 +176,8 @@
             cube.add(line);
 
             cube.userData = {
-                rotSpeed: { x: (Math.random() - 0.5) * 0.05, y: (Math.random() - 0.5) * 0.05 },
-                isDead: false // Bandera de vida
+                bornAt: Date.now(), // Timestamp de nacimiento para escudo
+                rotSpeed: { x: (Math.random() - 0.5) * 0.05, y: (Math.random() - 0.5) * 0.05 }
             };
 
             targets.push(cube);
@@ -248,44 +248,29 @@
         }
 
         function checkIntersections() {
-            // CRÍTICO: Si no hay mano detectada, NO hacer nada
+            // Si no hay mano detectada, no hacer nada
             if (!handActive) return;
 
             raycaster.setFromCamera(mouse, camera);
-
-            // Buscamos intersecciones SOLO en los cubos padre (NO recursive)
             const intersects = raycaster.intersectObjects(targets, false);
 
             if (intersects.length > 0) {
                 let hitObject = intersects[0].object;
 
-                // --- VALIDACIONES DE SEGURIDAD ---
+                // ESCUDO DE NACIMIENTO: Protección de 0.5 segundos
+                const age = Date.now() - hitObject.userData.bornAt;
+                if (age < 500) return;
 
-                // 1. Verificar que el objeto tiene userData (seguridad)
-                if (!hitObject.userData) return;
-
-                // 2. Si ya está muerto, ignorar INMEDIATAMENTE
-                if (hitObject.userData.isDead === true) return;
-
-                // 3. Distancia de seguridad
-                if (intersects[0].distance > 12) return;
-
-                // 4. Verificar que está en la lista de targets
+                // Eliminar de la lista de targets PRIMERO
                 const index = targets.indexOf(hitObject);
-                if (index === -1) return;
+                if (index > -1) {
+                    targets.splice(index, 1);
+                }
 
-                // --- AQUÍ PROCESAMOS EL CORTE ---
-
-                // CRÍTICO: Marcar como muerto y eliminar de targets PRIMERO
-                hitObject.userData.isDead = true;
-                targets.splice(index, 1);
-
-                // Ahora sí, efectos visuales y puntos
-                hitObject.visible = false;
+                // Efectos y puntos
                 createExplosion(hitObject.position);
                 score += 100;
                 scoreElement.textContent = score;
-
                 console.log("⚔️ CORTE! Puntos:", score);
 
                 // Eliminar de la escena
@@ -302,28 +287,115 @@
 
         function drawTrail() {
             trailCtx.clearRect(0, 0, trailCanvas.width, trailCanvas.height);
-            trailCtx.lineCap = 'round'; trailCtx.lineJoin = 'round';
 
-            if (trailPoints.length < 2) return;
+            // Si hay muy pocos puntos, no dibujamos para evitar errores
+            if (trailPoints.length < 3) {
+                actualizarEdadPuntos();
+                return;
+            }
+
+            // --- CONFIGURACIÓN ESTÉTICA ---
+            // Color base esmeralda
+            trailCtx.fillStyle = 'rgba(80, 200, 120, 0.85)';
+            trailCtx.shadowBlur = 25;
+            trailCtx.shadowColor = '#50c878';
 
             trailCtx.beginPath();
-            trailCtx.moveTo(trailPoints[0].x, trailPoints[0].y);
 
-            for (let i = 1; i < trailPoints.length; i++) {
-                trailCtx.lineTo(trailPoints[i].x, trailPoints[i].y);
+            // --- ALGORITMO DE CINTA (RIBBON) ---
+            // En lugar de una línea, vamos a dibujar un polígono que rodea los puntos.
+            // Calcularemos el "lado izquierdo" y el "lado derecho" del corte.
+
+            // 1. DIBUJAR EL LADO IZQUIERDO (Ida)
+            for (let i = 0; i < trailPoints.length; i++) {
+                const point = trailPoints[i];
+
+                // Calculamos el grosor: El inicio (i=0) es la cola (fino), el final es la cabeza (grueso)
+                // Invertimos lógica: los puntos viejos (i=0) son la cola.
+                // Cuanto más alto el índice i, más nuevo es el punto.
+
+                // Grosor dinámico: de 2px (cola) a 15px (cabeza)
+                const progress = i / (trailPoints.length - 1);
+                const width = 2 + (15 * Math.pow(progress, 2));
+
+                // Calcular ángulo hacia el siguiente punto para saber la perpendicular
+                let dx = 0, dy = 0;
+                if (i < trailPoints.length - 1) {
+                    dx = trailPoints[i + 1].x - point.x;
+                    dy = trailPoints[i + 1].y - point.y;
+                } else if (i > 0) {
+                    // Para el último punto, usamos el ángulo del anterior
+                    dx = point.x - trailPoints[i - 1].x;
+                    dy = point.y - trailPoints[i - 1].y;
+                }
+
+                // Matemáticas de vectores para obtener la perpendicular
+                const angle = Math.atan2(dy, dx);
+                const sin = Math.sin(angle);
+                const cos = Math.cos(angle);
+
+                // Offset perpendicular (Lado Izquierdo)
+                // -sin y +cos nos da la rotación de 90 grados
+                const px = point.x - sin * (width / 2);
+                const py = point.y + cos * (width / 2);
+
+                if (i === 0) {
+                    trailCtx.moveTo(px, py);
+                } else {
+                    trailCtx.lineTo(px, py);
+                }
             }
 
-            trailCtx.strokeStyle = 'rgba(80, 200, 120, 0.8)';
-            trailCtx.lineWidth = 8;
-            trailCtx.shadowBlur = 15;
-            trailCtx.shadowColor = '#50c878';
-            trailCtx.stroke();
+            // 2. PUNTA REDONDEADA (Curva en la cabeza del corte)
+            const last = trailPoints[trailPoints.length - 1];
+            // Hacemos un pequeño arco en la punta para que no quede cuadrada
+            trailCtx.arc(last.x, last.y, 8, 0, Math.PI * 2);
 
-            // Envejecer rastro
+            // 3. DIBUJAR EL LADO DERECHO (Vuelta)
+            // Recorremos los puntos hacia atrás para cerrar la forma
             for (let i = trailPoints.length - 1; i >= 0; i--) {
-                trailPoints[i].age -= 0.15;
+                const point = trailPoints[i];
+
+                // Mismo cálculo de grosor
+                const progress = i / (trailPoints.length - 1);
+                const width = 2 + (15 * Math.pow(progress, 2));
+
+                // Mismo cálculo de ángulo
+                let dx = 0, dy = 0;
+                if (i < trailPoints.length - 1) {
+                    dx = trailPoints[i + 1].x - point.x;
+                    dy = trailPoints[i + 1].y - point.y;
+                } else if (i > 0) {
+                    dx = point.x - trailPoints[i - 1].x;
+                    dy = point.y - trailPoints[i - 1].y;
+                }
+
+                const angle = Math.atan2(dy, dx);
+                const sin = Math.sin(angle);
+                const cos = Math.cos(angle);
+
+                // Offset perpendicular INVERSO (Lado Derecho)
+                const px = point.x + sin * (width / 2);
+                const py = point.y - cos * (width / 2);
+
+                trailCtx.lineTo(px, py);
+            }
+
+            trailCtx.closePath();
+
+            // Relleno verde esmeralda
+            trailCtx.fill();
+
+            actualizarEdadPuntos();
+        }
+
+        // Función de limpieza (sin cambios, solo para asegurar que la tengas)
+        function actualizarEdadPuntos() {
+            for (let i = trailPoints.length - 1; i >= 0; i--) {
+                trailPoints[i].age -= 0.12;
                 if (trailPoints[i].age <= 0) trailPoints.splice(i, 1);
             }
+            if (trailPoints.length > 25) trailPoints.shift();
         }
 
         function resizeTrailCanvas() {
